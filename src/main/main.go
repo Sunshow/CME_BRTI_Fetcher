@@ -66,7 +66,7 @@ func main()  {
 
 			defer db.Close()
 
-			saveSql := "INSERT OR IGNORE INTO `brti_logs` VALUES(?,?,NULL)"
+			saveSql := "INSERT OR IGNORE INTO `brti_logs`(`log_time`,`log_price`) VALUES(?,?)"
 			stmt, err := db.Prepare(saveSql)
 			if err != nil {
 				log.Printf("prepare stmt error: %v\n", err)
@@ -81,13 +81,13 @@ func main()  {
 				return
 			}
 
-			affect, err := res.RowsAffected()
+			affectedRows, err := res.RowsAffected()
 			if err != nil {
 				log.Println(err)
 				return
 			}
 
-			if affect > 0 {
+			if affectedRows > 0 {
 				log.Printf("saved brti log, timestamp=%v, price=%v\n", ts, brti.Value)
 			}
 		}()
@@ -149,6 +149,8 @@ func initDb(dbPath string) {
 	if err != nil {
 		log.Fatal(err)
 	}
+
+	defer rows.Close()
 
 	if !rows.Next() {
 		log.Println("init table brti_logs")
