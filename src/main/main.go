@@ -12,7 +12,12 @@ import (
 	_ "github.com/mattn/go-sqlite3"
 	"database/sql"
 	"github.com/gin-gonic/gin"
+	"github.com/spf13/viper"
 )
+
+type FetcherConfig struct {
+	FetchBRTI bool
+}
 
 type BRTI struct {
 	Value float64 `json:"value"`
@@ -24,6 +29,32 @@ type BRTIRESP struct {
 	Price float64 `json:"price"`
 }
 
+func initConfig(configPath string) (FetcherConfig, error) {
+	viper.SetDefault("FetchBRTI", "false")
+
+	viper.SetConfigName("config")
+	viper.AddConfigPath(configPath)
+
+	var config FetcherConfig
+
+	err := viper.ReadInConfig()
+	if err != nil {
+		log.Println(err)
+		switch err.(type) {
+		case viper.ConfigFileNotFoundError:
+			// did nothing
+			break
+		default:
+			log.Println(err)
+			return config, err
+		}
+	}
+
+	config.FetchBRTI = viper.GetBool("FetchBRTI")
+
+	return config, nil
+}
+
 func main()  {
 	dir, err := filepath.Abs(filepath.Dir(os.Args[0]))
 	if err != nil {
@@ -31,17 +62,25 @@ func main()  {
 	}
 	log.Printf("running path: %v", dir)
 
+	log.Printf("running config: %v", dir)
+	config, err := initConfig(dir)
+	if err != nil {
+		log.Fatal(err)
+	}
+
 	dbPath := fmt.Sprintf("%v/brti.db", dir)
 	log.Printf("running db: %v", dbPath)
 
 	initDb(dbPath)
 
-	go func() {
-		for {
-			fetch(dbPath)
-			time.Sleep(time.Millisecond * 500)
-		}
-	}()
+	if config.FetchBRTI {
+		go func() {
+			for {
+				fetch(dbPath)
+				time.Sleep(time.Millisecond * 500)
+			}
+		}()
+	}
 
 	r := gin.Default()
 
