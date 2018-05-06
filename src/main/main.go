@@ -13,10 +13,12 @@ import (
 	"database/sql"
 	"github.com/gin-gonic/gin"
 	"github.com/spf13/viper"
+	"strconv"
 )
 
 type FetcherConfig struct {
 	FetchBRTI bool
+	FetchBitstamp bool
 }
 
 type BRTI struct {
@@ -29,8 +31,23 @@ type BRTIRESP struct {
 	Price float64 `json:"price"`
 }
 
+type BitstampBtcUsd struct {
+	Last string `json:"last"`
+	Timestamp string `json:"timestamp"`
+	High string `json:"high"`
+	Low string `json:"low"`
+}
+
+type BitstampBtcUsdResp struct {
+	Value float64 `json:"value"`
+	Date string `json:"date"`
+	High float64 `json:"high"`
+	Low float64 `json:"low"`
+}
+
 func initConfig(configPath string) (FetcherConfig, error) {
 	viper.SetDefault("FetchBRTI", "false")
+	viper.SetDefault("FetchBitstamp", "true")
 
 	viper.SetConfigName("config")
 	viper.AddConfigPath(configPath)
@@ -51,6 +68,7 @@ func initConfig(configPath string) (FetcherConfig, error) {
 	}
 
 	config.FetchBRTI = viper.GetBool("FetchBRTI")
+	config.FetchBitstamp = viper.GetBool("FetchBitstamp")
 
 	return config, nil
 }
@@ -78,6 +96,15 @@ func main()  {
 			for {
 				fetch(dbPath)
 				time.Sleep(time.Millisecond * 500)
+			}
+		}()
+	}
+
+	if config.FetchBitstamp {
+		go func() {
+			for {
+				fetchAndSaveBitstampBtcUsd(dbPath)
+				time.Sleep(time.Second * 30)
 			}
 		}()
 	}
@@ -275,6 +302,99 @@ func fetchOnce() (BRTI, error) {
 	return brti, nil
 }
 
+func fetchAndSaveBitstampBtcUsd(dbPath string)  {
+	bitstamp, err:= fetchBitstampBtcUsdOnce()
+	if err != nil {
+		log.Println(err)
+		return
+	}
+
+	log.Printf("fetched bitstamp price=%v, timestamp=%v\n", bitstamp.Last, bitstamp.Timestamp)
+
+	ts, err := strconv.ParseInt(bitstamp.Timestamp, 10, 64)
+	if err != nil {
+		log.Println(err)
+		return
+	}
+
+	bitstampTime := time.Unix(ts, 0)
+	log.Printf("fetched bitstamp date=%v", bitstampTime.UTC().Format("2006-01-02 15:04:05"))
+
+	db, err := sql.Open("sqlite3", dbPath)
+	if err != nil {
+		log.Printf("open db error: %v\n", err)
+		return
+	}
+
+	defer db.Close()
+
+	saveSql := "INSERT INTO `bitstamp_btcusd_logs`(`log_time`,`log_price`,`log_low_hourly`,`log_high_hourly`) VALUES(?,?,?,?)"
+	stmt, err := db.Prepare(saveSql)
+	if err != nil {
+		log.Printf("prepare stmt error: %v\n", err)
+		return
+	}
+
+	defer stmt.Close()
+
+	res, err := stmt.Exec(ts, bitstamp.Last, bitstamp.Low, bitstamp.High)
+	if err != nil {
+		log.Printf("exec save sql error: %v\n", err)
+		return
+	}
+
+	affectedRows, err := res.RowsAffected()
+	if err != nil {
+		log.Println(err)
+		return
+	}
+
+	if affectedRows > 0 {
+		log.Printf("saved bitstamp btcusd log, timestamp=%v, price=%v\n", ts, bitstamp.Last)
+	}
+}
+
+func fetchBitstampBtcUsdOnce() (BitstampBtcUsd, error) {
+	url := fmt.Sprintf("https://www.bitstamp.net/api/v2/ticker_hour/btcusd/")
+	log.Printf("Fetch url %v\n", url)
+
+	var bitstamp BitstampBtcUsd
+
+	httpClient := http.Client{
+		Timeout: time.Second * 5,
+	}
+
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		log.Println(err)
+		return bitstamp, err
+	}
+
+	res, getErr := httpClient.Do(req)
+	if getErr != nil {
+		log.Println(getErr)
+		return bitstamp, getErr
+	}
+
+	defer res.Body.Close()
+
+	body, readErr := ioutil.ReadAll(res.Body)
+	if readErr != nil {
+		log.Println(readErr)
+		return bitstamp, readErr
+	}
+
+	bitstamp = BitstampBtcUsd{}
+
+	jsonErr := json.Unmarshal(body, &bitstamp)
+	if jsonErr != nil {
+		log.Println(jsonErr)
+		return bitstamp, jsonErr
+	}
+
+	return bitstamp, nil
+}
+
 func initDb(dbPath string) {
 	db, err := sql.Open("sqlite3", dbPath)
 	if err != nil {
@@ -283,7 +403,20 @@ func initDb(dbPath string) {
 
 	defer db.Close()
 
-	rows, err := db.Query("SELECT name FROM sqlite_master WHERE type='table' AND name='brti_logs'")
+	checkAndCreateTable(db,
+		"brti_logs",
+		"CREATE TABLE `brti_logs` (`log_time` BIGINT PRIMARY KEY,`log_price` DECIMAL(10,2) NOT NULL,`created_time` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP)")
+
+	checkAndCreateTable(db,
+		"bitstamp_btcusd_logs",
+		"CREATE TABLE `bitstamp_btcusd_logs` (`log_time` BIGINT PRIMARY KEY,`log_price` DECIMAL(10,2) NOT NULL,`log_low_hourly` DECIMAL(10,2) NOT NULL,`log_high_hourly` DECIMAL(10,2) NOT NULL,`created_time` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP)")
+
+	executeStmtSql(db, "CREATE INDEX idx_low_hourly ON `bitstamp_btcusd_logs`(`log_low_hourly`)")
+	executeStmtSql(db, "CREATE INDEX idx_high_hourly ON `bitstamp_btcusd_logs`(`log_high_hourly`)")
+}
+
+func checkAndCreateTable(db *sql.DB, tableName string, initSql string)  {
+	rows, err := db.Query(fmt.Sprintf("SELECT name FROM sqlite_master WHERE type='table' AND name='%v'", tableName))
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -291,21 +424,29 @@ func initDb(dbPath string) {
 	defer rows.Close()
 
 	if !rows.Next() {
-		log.Println("init table brti_logs")
-		createTableSql := "CREATE TABLE `brti_logs` (`log_time` BIGINT PRIMARY KEY,`log_price` DECIMAL(10,2) NOT NULL,`created_time` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP)"
+		log.Printf("init table %v\n", tableName)
 
-		stmt, err := db.Prepare(createTableSql)
+		err = executeStmtSql(db, initSql)
 		if err != nil {
 			log.Fatal(err)
 		}
 
-		defer stmt.Close()
-
-		_, err = stmt.Exec()
-		if err != nil {
-			log.Fatal(err)
-		}
-
-		log.Println("init table success")
+		log.Printf("init table %v success\n", tableName)
 	}
+}
+
+func executeStmtSql(db *sql.DB, sql string) error {
+	stmt, err := db.Prepare(sql)
+	if err != nil {
+		return err
+	}
+
+	defer stmt.Close()
+
+	_, err = stmt.Exec()
+	if err != nil {
+		return err
+	}
+
+	return nil
 }
