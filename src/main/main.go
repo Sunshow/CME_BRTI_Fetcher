@@ -39,10 +39,16 @@ type BitstampBtcUsd struct {
 }
 
 type BitstampBtcUsdResp struct {
-	Value float64 `json:"value"`
-	Date string `json:"date"`
+	Timestamp int64 `json:"timestamp"`
+	Price float64 `json:"price"`
 	High float64 `json:"high"`
 	Low float64 `json:"low"`
+}
+
+type BitstampBtcUsdLowestResp struct {
+	Begin int64 `json:"begin"`
+	End int64 `json:"end"`
+	Lowest float64 `json:"lowest"`
 }
 
 func initConfig(configPath string) (FetcherConfig, error) {
@@ -197,6 +203,111 @@ func main()  {
 			resp = append(resp, BRTIRESP{timestamp, price})
 		}
 		c.JSON(http.StatusOK, resp)
+	})
+
+	r.GET("/bitstamp/btcusd/latest", func(c *gin.Context) {
+		db, err := sql.Open("sqlite3", dbPath)
+		if err != nil {
+			log.Printf("open db error: %v\n", err)
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"message": "internal server error",
+			})
+			return
+		}
+
+		defer db.Close()
+
+		rows, err := db.Query("SELECT `log_time`,`log_price`,`log_low_hourly`,`log_high_hourly` FROM `bitstamp_btcusd_logs` ORDER BY `log_time` DESC LIMIT 10")
+		if err != nil {
+			log.Printf("query bitstamp btcusd latest error, error=%v\n", err)
+			c.JSON(http.StatusBadRequest, gin.H{
+				"message": "error",
+			})
+			return
+		}
+
+		defer rows.Close()
+
+		var resp []BitstampBtcUsdResp
+		for rows.Next() {
+			var timestamp int64
+			var price float64
+			var lowHourly float64
+			var highHourly float64
+
+			err = rows.Scan(&timestamp, &price, &lowHourly, &highHourly)
+
+			if err != nil {
+				log.Printf("read bitstamp btcusd latest error, error=%v\n", err)
+				c.JSON(http.StatusInternalServerError, gin.H{
+					"message": "internal server error",
+				})
+				return
+			}
+
+			resp = append(resp, BitstampBtcUsdResp{timestamp, price, lowHourly, highHourly})
+		}
+		c.JSON(http.StatusOK, resp)
+	})
+
+	r.GET("/bitstamp/btcusd/lowest/:begin/:end", func(c *gin.Context) {
+
+		tsBegin, err := strconv.ParseInt(c.Param("begin"), 10, 64)
+		if err != nil {
+			log.Println(err)
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"message": "internal server error",
+			})
+		}
+
+		tsEnd, err := strconv.ParseInt(c.Param("end"), 10, 64)
+		if err != nil {
+			log.Println(err)
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"message": "internal server error",
+			})
+		}
+
+		db, err := sql.Open("sqlite3", dbPath)
+		if err != nil {
+			log.Printf("open db error: %v\n", err)
+			return
+		}
+
+		defer db.Close()
+
+		rows, err := db.Query("SELECT `log_low_hourly` FROM `bitstamp_btcusd_logs` WHERE `log_time` BETWEEN ? AND ? ORDER BY `log_low_hourly` ASC LIMIT 1", tsBegin, tsEnd)
+		if err != nil {
+			log.Printf("query bitstamp btcusd lowest error, error=%v\n", err)
+			c.JSON(http.StatusBadRequest, gin.H{
+				"message": "error",
+			})
+			return
+		}
+
+		defer rows.Close()
+
+		var resp BitstampBtcUsdLowestResp
+		if rows.Next() {
+			var lowest float64
+
+			err = rows.Scan(&lowest)
+
+			if err != nil {
+				log.Printf("read bitstamp btcusd lowest error, error=%v\n", err)
+				c.JSON(http.StatusInternalServerError, gin.H{
+					"message": "internal server error",
+				})
+				return
+			}
+
+			resp = BitstampBtcUsdLowestResp{tsBegin, tsEnd, lowest}
+			c.JSON(http.StatusOK, resp)
+		} else {
+			c.JSON(http.StatusNotFound, gin.H{
+				"message": "not found",
+			})
+		}
 	})
 
 	r.Run() // listen and serve on 0.0.0.0:8080
