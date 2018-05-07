@@ -14,11 +14,14 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/spf13/viper"
 	"strconv"
+	"gdax"
+	"util"
 )
 
 type FetcherConfig struct {
 	FetchBRTI bool
 	FetchBitstamp bool
+	FetchGdax bool
 }
 
 type BRTI struct {
@@ -54,6 +57,7 @@ type BitstampBtcUsdLowestResp struct {
 func initConfig(configPath string) (FetcherConfig, error) {
 	viper.SetDefault("FetchBRTI", "false")
 	viper.SetDefault("FetchBitstamp", "true")
+	viper.SetDefault("FetchGdax", "true")
 
 	viper.SetConfigName("config")
 	viper.AddConfigPath(configPath)
@@ -75,6 +79,7 @@ func initConfig(configPath string) (FetcherConfig, error) {
 
 	config.FetchBRTI = viper.GetBool("FetchBRTI")
 	config.FetchBitstamp = viper.GetBool("FetchBitstamp")
+	config.FetchGdax = viper.GetBool("FetchGdax")
 
 	return config, nil
 }
@@ -110,6 +115,29 @@ func main()  {
 		go func() {
 			for {
 				fetchAndSaveBitstampBtcUsd(dbPath)
+				time.Sleep(time.Second * 30)
+			}
+		}()
+	}
+
+	if config.FetchGdax {
+		go func() {
+			db, err := util.OpenDB(dbPath)
+			if err != nil {
+				log.Printf("open db error: %v\n", err)
+				return
+			}
+			defer db.Close()
+
+			for {
+				ticker, err := gdax.FetchTicker(gdax.ProductBtcUsd)
+				if err != nil {
+					log.Println(err)
+					return
+				}
+
+				gdax.SaveTicker(db, &ticker)
+
 				time.Sleep(time.Second * 30)
 			}
 		}()
@@ -308,6 +336,31 @@ func main()  {
 				"message": "not found",
 			})
 		}
+	})
+
+	r.GET("/gdax/btcusd/latest", func(c *gin.Context) {
+		db, err := util.OpenDB(dbPath)
+		if err != nil {
+			log.Printf("open db error: %v\n", err)
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"message": "internal server error",
+			})
+			return
+		}
+
+		defer db.Close()
+
+		result, err := gdax.FindTickerLatest(db, 10)
+
+		if err != nil {
+			log.Printf("read gdax btcusd latest error, error=%v\n", err)
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"message": "internal server error",
+			})
+			return
+		}
+
+		c.JSON(http.StatusOK, result)
 	})
 
 	r.Run() // listen and serve on 0.0.0.0:8080
@@ -514,50 +567,16 @@ func initDb(dbPath string) {
 
 	defer db.Close()
 
-	checkAndCreateTable(db,
+	util.CheckAndCreateTable(db,
 		"brti_logs",
 		"CREATE TABLE `brti_logs` (`log_time` BIGINT PRIMARY KEY,`log_price` DECIMAL(10,2) NOT NULL,`created_time` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP)")
 
-	checkAndCreateTable(db,
+	util.CheckAndCreateTable(db,
 		"bitstamp_btcusd_logs",
 		"CREATE TABLE `bitstamp_btcusd_logs` (`log_time` BIGINT PRIMARY KEY,`log_price` DECIMAL(10,2) NOT NULL,`log_low_hourly` DECIMAL(10,2) NOT NULL,`log_high_hourly` DECIMAL(10,2) NOT NULL,`created_time` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP)")
 
-	executeStmtSql(db, "CREATE INDEX idx_low_hourly ON `bitstamp_btcusd_logs`(`log_low_hourly`)")
-	executeStmtSql(db, "CREATE INDEX idx_high_hourly ON `bitstamp_btcusd_logs`(`log_high_hourly`)")
-}
+	util.ExecuteStmtSql(db, "CREATE INDEX idx_low_hourly ON `bitstamp_btcusd_logs`(`log_low_hourly`)")
+	util.ExecuteStmtSql(db, "CREATE INDEX idx_high_hourly ON `bitstamp_btcusd_logs`(`log_high_hourly`)")
 
-func checkAndCreateTable(db *sql.DB, tableName string, initSql string)  {
-	rows, err := db.Query(fmt.Sprintf("SELECT name FROM sqlite_master WHERE type='table' AND name='%v'", tableName))
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	defer rows.Close()
-
-	if !rows.Next() {
-		log.Printf("init table %v\n", tableName)
-
-		err = executeStmtSql(db, initSql)
-		if err != nil {
-			log.Fatal(err)
-		}
-
-		log.Printf("init table %v success\n", tableName)
-	}
-}
-
-func executeStmtSql(db *sql.DB, sql string) error {
-	stmt, err := db.Prepare(sql)
-	if err != nil {
-		return err
-	}
-
-	defer stmt.Close()
-
-	_, err = stmt.Exec()
-	if err != nil {
-		return err
-	}
-
-	return nil
+	gdax.InitDb(db)
 }
