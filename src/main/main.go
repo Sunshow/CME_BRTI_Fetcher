@@ -122,23 +122,54 @@ func main()  {
 
 	if config.FetchGdax {
 		go func() {
-			db, err := util.OpenDB(dbPath)
-			if err != nil {
-				log.Printf("open db error: %v\n", err)
-				return
-			}
-			defer db.Close()
-
 			for {
-				ticker, err := gdax.FetchTicker(gdax.ProductBtcUsd)
-				if err != nil {
-					log.Println(err)
-					return
-				}
+				go func() {
+					ticker, err := gdax.FetchTicker(gdax.ProductBtcUsd)
+					if err != nil {
+						log.Println(err)
+						return
+					}
 
-				gdax.SaveTicker(db, &ticker)
+					db, err := util.OpenDB(dbPath)
+					if err != nil {
+						log.Printf("open db error: %v\n", err)
+						return
+					}
+					defer db.Close()
 
-				time.Sleep(time.Second * 30)
+					err = gdax.SaveTicker(db, &ticker)
+					if err != nil {
+						log.Println(err)
+						return
+					}
+				}()
+
+				go func() {
+					tsEnd := time.Now().Unix()
+
+					tsStart := tsEnd - 120
+
+					historics, err := gdax.FetchHistoric(gdax.ProductBtcUsd, tsStart, tsEnd)
+					if err != nil {
+						log.Println(err)
+						return
+					}
+
+					db, err := util.OpenDB(dbPath)
+					if err != nil {
+						log.Printf("open db error: %v\n", err)
+						return
+					}
+					defer db.Close()
+
+					err = gdax.SaveHistoric(db, historics)
+					if err != nil {
+						log.Println(err)
+						return
+					}
+				}()
+
+				time.Sleep(time.Second * 10)
 			}
 		}()
 	}
@@ -278,9 +309,8 @@ func main()  {
 		c.JSON(http.StatusOK, resp)
 	})
 
-	r.GET("/bitstamp/btcusd/lowest/:begin/:end", func(c *gin.Context) {
-
-		tsBegin, err := strconv.ParseInt(c.Param("begin"), 10, 64)
+	r.GET("/bitstamp/btcusd/lowest/:start/:end", func(c *gin.Context) {
+		tsStart, err := strconv.ParseInt(c.Param("start"), 10, 64)
 		if err != nil {
 			log.Println(err)
 			c.JSON(http.StatusInternalServerError, gin.H{
@@ -304,7 +334,7 @@ func main()  {
 
 		defer db.Close()
 
-		rows, err := db.Query("SELECT `log_low_hourly` FROM `bitstamp_btcusd_logs` WHERE `log_time` BETWEEN ? AND ? ORDER BY `log_low_hourly` ASC LIMIT 1", tsBegin, tsEnd)
+		rows, err := db.Query("SELECT `log_low_hourly` FROM `bitstamp_btcusd_logs` WHERE `log_time` BETWEEN ? AND ? ORDER BY `log_low_hourly` ASC LIMIT 1", tsStart, tsEnd)
 		if err != nil {
 			log.Printf("query bitstamp btcusd lowest error, error=%v\n", err)
 			c.JSON(http.StatusBadRequest, gin.H{
@@ -329,7 +359,7 @@ func main()  {
 				return
 			}
 
-			resp = BitstampBtcUsdLowestResp{tsBegin, tsEnd, lowest}
+			resp = BitstampBtcUsdLowestResp{tsStart, tsEnd, lowest}
 			c.JSON(http.StatusOK, resp)
 		} else {
 			c.JSON(http.StatusNotFound, gin.H{
@@ -354,6 +384,48 @@ func main()  {
 
 		if err != nil {
 			log.Printf("read gdax btcusd latest error, error=%v\n", err)
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"message": "internal server error",
+			})
+			return
+		}
+
+		c.JSON(http.StatusOK, result)
+	})
+
+	r.GET("/gdax/btcusd/lowest/:start/:end", func(c *gin.Context) {
+		tsStart, err := strconv.ParseInt(c.Param("start"), 10, 64)
+		if err != nil {
+			log.Println(err)
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"message": "internal server error",
+			})
+		}
+
+		tsEnd, err := strconv.ParseInt(c.Param("end"), 10, 64)
+		if err != nil {
+			log.Println(err)
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"message": "internal server error",
+			})
+		}
+
+		db, err := util.OpenDB(dbPath)
+		if err != nil {
+			log.Printf("open db error: %v\n", err)
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"message": "internal server error",
+			})
+			return
+		}
+
+		defer db.Close()
+
+
+		result, err := gdax.FindHistoricLowest(db, tsStart, tsEnd)
+
+		if err != nil {
+			log.Printf("read gdax btcusd lowest error, error=%v\n", err)
 			c.JSON(http.StatusInternalServerError, gin.H{
 				"message": "internal server error",
 			})
@@ -575,8 +647,8 @@ func initDb(dbPath string) {
 		"bitstamp_btcusd_logs",
 		"CREATE TABLE `bitstamp_btcusd_logs` (`log_time` BIGINT PRIMARY KEY,`log_price` DECIMAL(10,2) NOT NULL,`log_low_hourly` DECIMAL(10,2) NOT NULL,`log_high_hourly` DECIMAL(10,2) NOT NULL,`created_time` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP)")
 
-	util.ExecuteStmtSql(db, "CREATE INDEX idx_low_hourly ON `bitstamp_btcusd_logs`(`log_low_hourly`)")
-	util.ExecuteStmtSql(db, "CREATE INDEX idx_high_hourly ON `bitstamp_btcusd_logs`(`log_high_hourly`)")
+	util.ExecuteStmtSql(db, "CREATE INDEX IF NOT EXISTS idx_low_hourly ON `bitstamp_btcusd_logs`(`log_low_hourly`)")
+	util.ExecuteStmtSql(db, "CREATE INDEX IF NOT EXISTS idx_high_hourly ON `bitstamp_btcusd_logs`(`log_high_hourly`)")
 
 	gdax.InitDb(db)
 }
