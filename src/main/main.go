@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"gdax"
 	"util"
+	"bitstamp"
 )
 
 type FetcherConfig struct {
@@ -32,26 +33,6 @@ type BRTI struct {
 type BRTIRESP struct {
 	Timestamp int64 `json:"timestamp"`
 	Price float64 `json:"price"`
-}
-
-type BitstampBtcUsd struct {
-	Last string `json:"last"`
-	Timestamp string `json:"timestamp"`
-	High string `json:"high"`
-	Low string `json:"low"`
-}
-
-type BitstampBtcUsdResp struct {
-	Timestamp int64 `json:"timestamp"`
-	Price float64 `json:"price"`
-	High float64 `json:"high"`
-	Low float64 `json:"low"`
-}
-
-type BitstampBtcUsdLowestResp struct {
-	Begin int64 `json:"begin"`
-	End int64 `json:"end"`
-	Lowest float64 `json:"lowest"`
 }
 
 func initConfig(configPath string) (FetcherConfig, error) {
@@ -114,8 +95,28 @@ func main()  {
 	if config.FetchBitstamp {
 		go func() {
 			for {
-				fetchAndSaveBitstampBtcUsd(dbPath)
-				time.Sleep(time.Second * 30)
+				go func() {
+					ticker, err := bitstamp.FetchTicker(bitstamp.ProductBtcUsd)
+					if err != nil {
+						log.Println(err)
+						return
+					}
+
+					db, err := util.OpenDB(dbPath)
+					if err != nil {
+						log.Printf("open db error: %v\n", err)
+						return
+					}
+					defer db.Close()
+
+					err = bitstamp.SaveTicker(db, &ticker)
+					if err != nil {
+						log.Println(err)
+						return
+					}
+				}()
+
+				time.Sleep(time.Second * 10)
 			}
 		}()
 	}
@@ -265,7 +266,7 @@ func main()  {
 	})
 
 	r.GET("/bitstamp/btcusd/latest", func(c *gin.Context) {
-		db, err := sql.Open("sqlite3", dbPath)
+		db, err := util.OpenDB(dbPath)
 		if err != nil {
 			log.Printf("open db error: %v\n", err)
 			c.JSON(http.StatusInternalServerError, gin.H{
@@ -276,37 +277,17 @@ func main()  {
 
 		defer db.Close()
 
-		rows, err := db.Query("SELECT `log_time`,`log_price`,`log_low_hourly`,`log_high_hourly` FROM `bitstamp_btcusd_logs` ORDER BY `log_time` DESC LIMIT 10")
+		result, err := bitstamp.FindTickerLatest(db, 10)
+
 		if err != nil {
-			log.Printf("query bitstamp btcusd latest error, error=%v\n", err)
-			c.JSON(http.StatusBadRequest, gin.H{
-				"message": "error",
+			log.Printf("read bitstamp btcusd latest error, error=%v\n", err)
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"message": "internal server error",
 			})
 			return
 		}
 
-		defer rows.Close()
-
-		var resp []BitstampBtcUsdResp
-		for rows.Next() {
-			var timestamp int64
-			var price float64
-			var lowHourly float64
-			var highHourly float64
-
-			err = rows.Scan(&timestamp, &price, &lowHourly, &highHourly)
-
-			if err != nil {
-				log.Printf("read bitstamp btcusd latest error, error=%v\n", err)
-				c.JSON(http.StatusInternalServerError, gin.H{
-					"message": "internal server error",
-				})
-				return
-			}
-
-			resp = append(resp, BitstampBtcUsdResp{timestamp, price, lowHourly, highHourly})
-		}
-		c.JSON(http.StatusOK, resp)
+		c.JSON(http.StatusOK, result)
 	})
 
 	r.GET("/bitstamp/btcusd/lowest/:start/:end", func(c *gin.Context) {
@@ -326,46 +307,28 @@ func main()  {
 			})
 		}
 
-		db, err := sql.Open("sqlite3", dbPath)
+		db, err := util.OpenDB(dbPath)
 		if err != nil {
 			log.Printf("open db error: %v\n", err)
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"message": "internal server error",
+			})
 			return
 		}
 
 		defer db.Close()
 
-		rows, err := db.Query("SELECT `log_low_hourly` FROM `bitstamp_btcusd_logs` WHERE `log_time` BETWEEN ? AND ? ORDER BY `log_low_hourly` ASC LIMIT 1", tsStart, tsEnd)
+		result, err := bitstamp.FindHistoricLowest(db, tsStart, tsEnd)
+
 		if err != nil {
-			log.Printf("query bitstamp btcusd lowest error, error=%v\n", err)
-			c.JSON(http.StatusBadRequest, gin.H{
-				"message": "error",
+			log.Printf("read bitstamp btcusd lowest error, error=%v\n", err)
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"message": "internal server error",
 			})
 			return
 		}
 
-		defer rows.Close()
-
-		var resp BitstampBtcUsdLowestResp
-		if rows.Next() {
-			var lowest float64
-
-			err = rows.Scan(&lowest)
-
-			if err != nil {
-				log.Printf("read bitstamp btcusd lowest error, error=%v\n", err)
-				c.JSON(http.StatusInternalServerError, gin.H{
-					"message": "internal server error",
-				})
-				return
-			}
-
-			resp = BitstampBtcUsdLowestResp{tsStart, tsEnd, lowest}
-			c.JSON(http.StatusOK, resp)
-		} else {
-			c.JSON(http.StatusNotFound, gin.H{
-				"message": "not found",
-			})
-		}
+		c.JSON(http.StatusOK, result)
 	})
 
 	r.GET("/gdax/btcusd/latest", func(c *gin.Context) {
@@ -420,7 +383,6 @@ func main()  {
 		}
 
 		defer db.Close()
-
 
 		result, err := gdax.FindHistoricLowest(db, tsStart, tsEnd)
 
@@ -538,99 +500,6 @@ func fetchOnce() (BRTI, error) {
 	return brti, nil
 }
 
-func fetchAndSaveBitstampBtcUsd(dbPath string)  {
-	bitstamp, err:= fetchBitstampBtcUsdOnce()
-	if err != nil {
-		log.Println(err)
-		return
-	}
-
-	log.Printf("fetched bitstamp price=%v, timestamp=%v\n", bitstamp.Last, bitstamp.Timestamp)
-
-	ts, err := strconv.ParseInt(bitstamp.Timestamp, 10, 64)
-	if err != nil {
-		log.Println(err)
-		return
-	}
-
-	bitstampTime := time.Unix(ts, 0)
-	log.Printf("fetched bitstamp date=%v", bitstampTime.UTC().Format("2006-01-02 15:04:05"))
-
-	db, err := sql.Open("sqlite3", dbPath)
-	if err != nil {
-		log.Printf("open db error: %v\n", err)
-		return
-	}
-
-	defer db.Close()
-
-	saveSql := "INSERT INTO `bitstamp_btcusd_logs`(`log_time`,`log_price`,`log_low_hourly`,`log_high_hourly`) VALUES(?,?,?,?)"
-	stmt, err := db.Prepare(saveSql)
-	if err != nil {
-		log.Printf("prepare stmt error: %v\n", err)
-		return
-	}
-
-	defer stmt.Close()
-
-	res, err := stmt.Exec(ts, bitstamp.Last, bitstamp.Low, bitstamp.High)
-	if err != nil {
-		log.Printf("exec save sql error: %v\n", err)
-		return
-	}
-
-	affectedRows, err := res.RowsAffected()
-	if err != nil {
-		log.Println(err)
-		return
-	}
-
-	if affectedRows > 0 {
-		log.Printf("saved bitstamp btcusd log, timestamp=%v, price=%v\n", ts, bitstamp.Last)
-	}
-}
-
-func fetchBitstampBtcUsdOnce() (BitstampBtcUsd, error) {
-	url := fmt.Sprintf("https://www.bitstamp.net/api/v2/ticker_hour/btcusd/")
-	log.Printf("Fetch url %v\n", url)
-
-	var bitstamp BitstampBtcUsd
-
-	httpClient := http.Client{
-		Timeout: time.Second * 5,
-	}
-
-	req, err := http.NewRequest(http.MethodGet, url, nil)
-	if err != nil {
-		log.Println(err)
-		return bitstamp, err
-	}
-
-	res, getErr := httpClient.Do(req)
-	if getErr != nil {
-		log.Println(getErr)
-		return bitstamp, getErr
-	}
-
-	defer res.Body.Close()
-
-	body, readErr := ioutil.ReadAll(res.Body)
-	if readErr != nil {
-		log.Println(readErr)
-		return bitstamp, readErr
-	}
-
-	bitstamp = BitstampBtcUsd{}
-
-	jsonErr := json.Unmarshal(body, &bitstamp)
-	if jsonErr != nil {
-		log.Println(jsonErr)
-		return bitstamp, jsonErr
-	}
-
-	return bitstamp, nil
-}
-
 func initDb(dbPath string) {
 	db, err := sql.Open("sqlite3", dbPath)
 	if err != nil {
@@ -643,12 +512,7 @@ func initDb(dbPath string) {
 		"brti_logs",
 		"CREATE TABLE `brti_logs` (`log_time` BIGINT PRIMARY KEY,`log_price` DECIMAL(10,2) NOT NULL,`created_time` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP)")
 
-	util.CheckAndCreateTable(db,
-		"bitstamp_btcusd_logs",
-		"CREATE TABLE `bitstamp_btcusd_logs` (`log_time` BIGINT PRIMARY KEY,`log_price` DECIMAL(10,2) NOT NULL,`log_low_hourly` DECIMAL(10,2) NOT NULL,`log_high_hourly` DECIMAL(10,2) NOT NULL,`created_time` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP)")
-
-	util.ExecuteStmtSql(db, "CREATE INDEX IF NOT EXISTS idx_low_hourly ON `bitstamp_btcusd_logs`(`log_low_hourly`)")
-	util.ExecuteStmtSql(db, "CREATE INDEX IF NOT EXISTS idx_high_hourly ON `bitstamp_btcusd_logs`(`log_high_hourly`)")
+	bitstamp.InitDb(db)
 
 	gdax.InitDb(db)
 }
