@@ -175,6 +175,7 @@ func main()  {
 		}()
 	}
 
+	gin.SetMode(gin.ReleaseMode)
 	r := gin.Default()
 
 	r.GET("/brti/timestamp/:timestamp", func(c *gin.Context) {
