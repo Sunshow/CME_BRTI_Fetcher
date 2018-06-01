@@ -99,6 +99,11 @@ func FindHistoricLowest(db *sql.DB, tsStart int64, tsEnd int64) (Historic, error
 }
 
 func SaveTicker(db *sql.DB, ticker *Ticker) error {
+	if ticker.Price <= 0 {
+		log.Printf("ignore invalid data: %v\n", ticker)
+		return errors.New("invalid price")
+	}
+
 	saveSql := "INSERT OR IGNORE INTO `gdax_btcusd_logs`(`log_time`,`log_price`) VALUES(?,?)"
 	stmt, err := db.Prepare(saveSql)
 	if err != nil {
@@ -189,6 +194,10 @@ func SaveHistoric(db *sql.DB, historics []Historic) error {
 	defer stmt.Close()
 
 	for _, v := range historics {
+		if v.Open <= 0 {
+			log.Printf("ignore invalid data: %v\n", v)
+			continue
+		}
 		_, err := stmt.Exec(v.Time, v.Low, v.High, v.Open, v.Close)
 		if err != nil {
 			log.Printf("exec save sql error: %v\n", err)
