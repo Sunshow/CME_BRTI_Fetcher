@@ -20,6 +20,7 @@ import (
 )
 
 type FetcherConfig struct {
+	Port int64
 	FetchBRTI bool
 	FetchBitstamp bool
 	FetchGdax bool
@@ -36,6 +37,7 @@ type BRTIRESP struct {
 }
 
 func initConfig(configPath string) (FetcherConfig, error) {
+	viper.SetDefault("Port", "8080")
 	viper.SetDefault("FetchBRTI", "false")
 	viper.SetDefault("FetchBitstamp", "true")
 	viper.SetDefault("FetchGdax", "true")
@@ -58,6 +60,7 @@ func initConfig(configPath string) (FetcherConfig, error) {
 		}
 	}
 
+	config.Port = viper.GetInt64("Port")
 	config.FetchBRTI = viper.GetBool("FetchBRTI")
 	config.FetchBitstamp = viper.GetBool("FetchBitstamp")
 	config.FetchGdax = viper.GetBool("FetchGdax")
@@ -398,7 +401,7 @@ func main()  {
 		c.JSON(http.StatusOK, result)
 	})
 
-	r.Run() // listen and serve on 0.0.0.0:8080
+	r.Run(fmt.Sprintf(":%v", config.Port)) // listen and serve on 0.0.0.0:8080
 }
 
 func fetch(dbPath string)  {
